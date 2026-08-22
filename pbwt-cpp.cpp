@@ -4,6 +4,8 @@
 #include <string>
 #include <iostream>
 #include <cassert>
+#include <algorithm>
+#include <utility>
 
 //Type alias for std::vector<std::vector<uint8_t>>
 //which is the 2D-vector array that is being made
@@ -19,39 +21,80 @@ struct PrefixAndDivergenceArrays{
 
 void ReportLongMatches(const Panel& panel, size_t M, size_t N, size_t L, const PrefixAndDivergenceArrays& output){
 
-    //Testing function with L = 3
-    
-    for(size_t k{0}; k < N; k++){
-        std::vector<uint32_t> a, b;
+    // Each entry is (haplotype id, its index in output.a[k]).
+    // The index is needed because the start of a maximal match between two
+    // haplotypes is the largest divergence value between their two positions.
+    std::vector<std::pair<uint32_t, size_t>> a, b;
+
+    for(size_t k{0}; k <= N; k++){
+        a.clear();
+        b.clear();
+
+        const std::vector<uint32_t>& div = output.div[k];
+
+        //Reports one pair: start is max(div[lo+1 .. hi]), end is the site before k
+        auto emit = [&](std::pair<uint32_t, size_t> u, std::pair<uint32_t, size_t> v){
+            size_t lo = std::min(u.second, v.second);
+            size_t hi = std::max(u.second, v.second);
+
+            uint32_t start = 0;
+            for(size_t t{lo + 1}; t <= hi; t++){
+                if(div[t] > start){
+                    start = div[t];
+                }
+            }
+
+            std::cout << std::min(u.first, v.first) << '\t'
+                      << std::max(u.first, v.first) << '\t'
+                      << start << '\t' << (k - 1) << '\n';
+        };
 
         //Lambda for flush to combat repetitive logic
         auto flush = [&](){
-            for(size_t iu{0}; iu < a.size(); iu++){
-                for(size_t iv{0}; iv < b.size(); iv++){
-                    std::cout << "Match from " << a[iu] << " to " << b[iv] << " ending at " << k << "\n";
+            if(k == N){
+                //No site N to split on, so every surviving pair must be reported now
+                for(size_t u{0}; u < a.size(); u++){
+                    for(size_t v{u + 1}; v < a.size(); v++){
+                        emit(a[u], a[v]);
+                    }
+                }
+            }
+            else{
+                for(size_t u{0}; u < a.size(); u++){
+                    for(size_t v{0}; v < b.size(); v++){
+                        emit(a[u], b[v]);
+                    }
                 }
             }
         };
 
+        //At k == N everything lands in a, so b is always empty there
+        auto ready = [&](){
+            return (k == N) ? (a.size() > 1) : (!a.empty() && !b.empty());
+        };
+
         for(size_t i{0}; i < M; i++){
-            if(output.div[k][i] + L > k){
-                if(a.size() > 0 && b.size() > 0){
+            if(div[i] + L > k){
+                if(ready()){
                     flush();
                 }
                 a.clear();
                 b.clear();
             }
 
-            size_t hap = output.a[k][i];
-            if(panel[k][hap] == 0){
-                a.push_back(hap);
+            uint32_t hap = output.a[k][i];
+            //k == N short-circuits before panel[k] is touched
+            if(k == N || panel[k][hap] == 0){
+                a.push_back({hap, i});
             }
             else{
-                b.push_back(hap);
+                b.push_back({hap, i});
             }
         }
-        // flush whatever's still open when the array ends
-        flush();
+
+        if(ready()){
+            flush();
+        }
     }
 }
 
@@ -141,22 +184,24 @@ Panel loadPanel(std::string path, size_t& M, size_t& N){
         exit(1);
     }
     //Gets # rows
-    M = grid.size();
+    N = grid.size();
     //Gets # cols and checks that every column has equal rows, if not, fails
-    N = grid[0].size();
-    for(size_t i{0}; i < M; i++){
-        if(grid[i].size() != N){
-            std::cerr << "Column lengths vary. Failed.";
+    M = grid[0].size();
+    for(size_t k{0}; k < N; k++){
+        if(grid[k].size() != M){
+            std::cerr << "Row lengths vary. Failed.";
             exit(1);
         }
     }
 
     Panel panel(N, std::vector<uint8_t>(M));
     //Adding to panel vector by transposing
-    for(size_t i{0}; i < M; i++){
-        for(size_t j{0}; j < N; j++){
+    //Grid rows are already sites and columns are already haplotypes,
+    //so no transpose is needed
+    for(size_t k{0}; k < N; k++){
+        for(size_t h{0}; h < M; h++){
             //Subtracting by '0' converts the ASCII value to int
-            panel[j][i] = grid[i][j] - '0';
+            panel[k][h] = grid[k][h] - '0';
         }
     }
 
@@ -186,33 +231,33 @@ int main(int argc, char** argv) {
     size_t L = std::stoi(argv[2]);
     Panel panel = loadPanel(path, M, N);
     
-    //Test block
-    for(size_t i{0}; i < M; i++){
-        std::string whole = "";
-        for(size_t j{0}; j < N; j++){
-            whole += panel[j][i] + '0';
-        }
-        std::cout << whole << "\n";
-    }
+    // //Test block
+    // for(size_t i{0}; i < M; i++){
+    //     std::string whole = "";
+    //     for(size_t j{0}; j < N; j++){
+    //         whole += panel[j][i] + '0';
+    //     }
+    //     std::cout << whole << "\n";
+    //}
 
     //Algorithms 1 and 2, output is a variable that has direct access to the Prefix and Divergence arrays
     PrefixAndDivergenceArrays output = buildPrefixArraysAndDivergenceArrays(panel, M, N);
 
-    //Prefix test block
-    // Loops N+1 times becuase it gets one initial array before any sites are processed, then N passes (one per site)
-    for (size_t i{0}; i <= N; i++){
-        for(size_t j{0}; j < M; j++){
-            std::cout << output.a[i][j] << " ";
-        }
-        std::cout << "\n";
-    }
-    //Divergence test block
-    for (size_t i{0}; i <= N; i++){
-        for(size_t j{0}; j < M; j++){
-            std::cout << output.div[i][j] << " ";
-        }
-        std::cout << "\n";
-    }
+    // //Prefix test block
+    // // Loops N+1 times becuase it gets one initial array before any sites are processed, then N passes (one per site)
+    // for (size_t i{0}; i <= N; i++){
+    //     for(size_t j{0}; j < M; j++){
+    //         std::cout << output.a[i][j] << " ";
+    //     }
+    //     std::cout << "\n";
+    // }
+    // //Divergence test block
+    // for (size_t i{0}; i <= N; i++){
+    //     for(size_t j{0}; j < M; j++){
+    //         std::cout << output.div[i][j] << " ";
+    //     }
+    //     std::cout << "\n";
+    // }
 
     //Algorithm 3
     ReportLongMatches(panel, M, N, L, output);
